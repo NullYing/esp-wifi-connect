@@ -72,6 +72,7 @@ private:
     std::string ota_url_;
     int8_t max_tx_power_;
     bool remember_bssid_;
+    bool roaming_;
     bool sleep_mode_;
     bool show_ota_config_ = false;
     bool show_sleep_config_ = false;

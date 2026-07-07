@@ -28,6 +28,7 @@ WifiStation::WifiStation() {
     if (err != ESP_OK) {
         max_tx_power_ = 0;
         remember_bssid_ = 0;
+        roaming_ = 0;
     } else {
         err = nvs_get_i8(nvs, "max_tx_power", &max_tx_power_);
         if (err != ESP_OK) {
@@ -36,6 +37,10 @@ WifiStation::WifiStation() {
         err = nvs_get_u8(nvs, "remember_bssid", &remember_bssid_);
         if (err != ESP_OK) {
             remember_bssid_ = 0;
+        }
+        err = nvs_get_u8(nvs, "roaming", &roaming_);
+        if (err != ESP_OK) {
+            roaming_ = 0;
         }
         nvs_close(nvs);
     }
@@ -247,6 +252,15 @@ void WifiStation::StartConnect() {
         // which is why we saw it connect to a -79 dBm AP even though a -73 dBm one
         // was available (the stronger AP rejected the first attempt).
         wifi_config.sta.failure_retry_cnt = failure_retry_cnt_;
+        if (roaming_) {
+#if CONFIG_ESP_WIFI_11KV_SUPPORT
+            wifi_config.sta.rm_enabled = 1;
+            wifi_config.sta.btm_enabled = 1;
+#endif
+#if CONFIG_ESP_WIFI_11R_SUPPORT
+            wifi_config.sta.ft_enabled = 1;
+#endif
+        }
     }
     wifi_config.sta.listen_interval = 10;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));

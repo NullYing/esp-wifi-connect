@@ -585,6 +585,14 @@
                     <input type="checkbox" id="remember_bssid" name="remember_bssid">
                 </div>
 
+                <!-- Roaming -->
+                <div class="switch-row">
+                    <label for="roaming">
+                        <span data-lang="roaming">Enable Wi-Fi Roaming (802.11k/v/r)</span>
+                    </label>
+                    <input type="checkbox" id="roaming" name="roaming">
+                </div>
+
                 <!-- Sleep Mode (visibility controlled by show_sleep_config from server) -->
                 <div class="switch-row" id="sleep_config_row" style="display: none;">
                     <label for="sleep_mode">
@@ -759,6 +767,7 @@
                 ota_url: 'Custom OTA URL:',
                 max_tx_power: 'Wi-Fi Max TX Power:',
                 remember_bssid: 'Remember BSSID when connecting to Wi-Fi',
+                roaming: 'Enable Wi-Fi Roaming (802.11k/v/r)',
                 sleep_mode: 'Enable Sleep Mode',
                 save: 'Save',
                 config_success: 'Configuration successful!'
@@ -1310,6 +1319,7 @@
                 ota_url: '自定义 OTA 地址:',
                 max_tx_power: 'Wi-Fi 最大发射功率:',
                 remember_bssid: '连接 Wi-Fi 时记住 BSSID',
+                roaming: '启用 Wi-Fi 漫游 (802.11k/v/r)',
                 sleep_mode: '启用睡眠模式',
                 save: '保存',
                 config_success: '配置成功！'
@@ -1446,25 +1456,28 @@
                 return changeLanguage();
             }
             
+            const dict = translations[lang];
+            const fallback = translations['en-US'];
+
             // Set page title
-            document.title = translations[lang].title;
+            document.title = dict.title || fallback.title;
             
             // Update text content
             document.querySelectorAll('[data-lang]').forEach(element => {
                 const key = element.getAttribute('data-lang');
-                element.textContent = translations[lang][key];
+                element.textContent = dict[key] || fallback[key] || element.textContent;
             });
             
             // Update input values
             document.querySelectorAll('[data-lang-value]').forEach(element => {
                 const key = element.getAttribute('data-lang-value');
-                element.value = translations[lang][key];
+                element.value = dict[key] || fallback[key] || element.value;
             });
             
             // Update AP list text based on 5G support
             const apList = document.getElementById('ap_list');
             if (apList.firstChild) {
-                const selectText = support5G ? translations[lang].select_wifi_5g : translations[lang].select_wifi;
+                const selectText = support5G ? (dict.select_wifi_5g || fallback.select_wifi_5g) : (dict.select_wifi || fallback.select_wifi);
                 apList.firstChild.textContent = selectText;
             }
             
@@ -1565,7 +1578,9 @@
                     support5G = data.support_5g;
                     
                     // Use select_wifi_5g if 5G is supported, otherwise use select_wifi
-                    const selectText = support5G ? translations[lang].select_wifi_5g : translations[lang].select_wifi;
+                    const dict = translations[lang] || translations['en-US'];
+                    const fallback = translations['en-US'];
+                    const selectText = support5G ? (dict.select_wifi_5g || fallback.select_wifi_5g) : (dict.select_wifi || fallback.select_wifi);
                     apList.innerHTML = '<p>' + selectText + '</p>';
                     
                     // Iterate through available APs
@@ -1665,6 +1680,7 @@
                 ota_url: document.getElementById('ota_url').value,
                 max_tx_power: parseInt(document.getElementById('max_tx_power').value),
                 remember_bssid: document.getElementById('remember_bssid').checked,
+                roaming: document.getElementById('roaming').checked,
                 sleep_mode: document.getElementById('sleep_mode').checked
             };
 
@@ -1746,6 +1762,10 @@
                 if (data.remember_bssid !== undefined) {
                     document.getElementById('remember_bssid').checked = data.remember_bssid;
                 }
+                if (data.roaming !== undefined) {
+                    document.getElementById('roaming').checked = data.roaming;
+                }
+                syncRoamingAvailability();
                 if (data.sleep_mode !== undefined) {
                     document.getElementById('sleep_mode').checked = data.sleep_mode;
                 }
@@ -1759,6 +1779,17 @@
          */
         function clearOtaUrl() {
             document.getElementById('ota_url').value = '';
+        }
+
+        function syncRoamingAvailability() {
+            const rememberBssid = document.getElementById('remember_bssid');
+            const roaming = document.getElementById('roaming');
+            if (rememberBssid.checked) {
+                roaming.checked = false;
+                roaming.disabled = true;
+            } else {
+                roaming.disabled = false;
+            }
         }
 
         // ========== Initialization ==========
@@ -1781,6 +1812,7 @@
             
             document.getElementById('language').value = savedLang;
             changeLanguage();
+            document.getElementById('remember_bssid').addEventListener('change', syncRoamingAvailability);
             loadSavedList();
             loadAPList();
             loadAdvancedConfig();

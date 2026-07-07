@@ -74,6 +74,7 @@ private:
     std::string ip_address_;
     int8_t max_tx_power_;
     uint8_t remember_bssid_;
+    uint8_t roaming_;
     uint8_t failure_retry_cnt_ = 3;  // Retries on strongest AP before falling back
     int reconnect_count_ = 0;
 

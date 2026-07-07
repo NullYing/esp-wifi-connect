@@ -36,6 +36,7 @@ WifiConfigurationAp::WifiConfigurationAp()
     instance_got_ip_ = nullptr;
     max_tx_power_ = 0;
     remember_bssid_ = false;
+    roaming_ = false;
 }
 
 std::vector<wifi_ap_record_t> WifiConfigurationAp::GetAccessPoints()
@@ -205,6 +206,15 @@ void WifiConfigurationAp::StartAccessPoint()
             remember_bssid_ = remember_bssid != 0;
         } else {
             remember_bssid_ = false; // 默认值
+        }
+
+        // 读取漫游设置
+        uint8_t roaming = 0;
+        err = nvs_get_u8(nvs, "roaming", &roaming);
+        if (err == ESP_OK) {
+            roaming_ = roaming != 0;
+        } else {
+            roaming_ = false; // 默认值
         }
 
         // 读取睡眠模式设置
@@ -529,6 +539,7 @@ void WifiConfigurationAp::StartWebServer()
             }
             cJSON_AddNumberToObject(json, "max_tx_power", this_->max_tx_power_);
             cJSON_AddBoolToObject(json, "remember_bssid", this_->remember_bssid_);
+            cJSON_AddBoolToObject(json, "roaming", this_->roaming_);
             cJSON_AddBoolToObject(json, "sleep_mode", this_->sleep_mode_);
             cJSON_AddBoolToObject(json, "show_ota_config", this_->show_ota_config_);
             cJSON_AddBoolToObject(json, "show_sleep_config", this_->show_sleep_config_);
@@ -637,6 +648,19 @@ void WifiConfigurationAp::StartWebServer()
                 }
             }
 
+            // 保存漫游设置
+            cJSON *roaming = cJSON_GetObjectItem(json, "roaming");
+            if (cJSON_IsBool(roaming)) {
+                this_->roaming_ = cJSON_IsTrue(roaming);
+                if (this_->remember_bssid_) {
+                    this_->roaming_ = false;
+                }
+                err = nvs_set_u8(nvs, "roaming", this_->roaming_ ? 1 : 0);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to save roaming: %d", err);
+                }
+            }
+
             // 保存睡眠模式设置
             cJSON *sleep_mode = cJSON_GetObjectItem(json, "sleep_mode");
             if (cJSON_IsBool(sleep_mode)) {
@@ -662,8 +686,8 @@ void WifiConfigurationAp::StartWebServer()
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
 
-            ESP_LOGI(TAG, "Saved settings: ota_url=%s, max_tx_power=%d, remember_bssid=%d, sleep_mode=%d",
-                this_->ota_url_.c_str(), this_->max_tx_power_, this_->remember_bssid_, this_->sleep_mode_);
+            ESP_LOGI(TAG, "Saved settings: ota_url=%s, max_tx_power=%d, remember_bssid=%d, roaming=%d, sleep_mode=%d",
+                this_->ota_url_.c_str(), this_->max_tx_power_, this_->remember_bssid_, this_->roaming_, this_->sleep_mode_);
             return ESP_OK;
         },
         .user_ctx = this
@@ -740,6 +764,15 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         strlcpy((char *)wifi_config.sta.password, password.c_str(), 64);
         wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
         wifi_config.sta.failure_retry_cnt = 1;
+        if (roaming_) {
+#if CONFIG_ESP_WIFI_11KV_SUPPORT
+            wifi_config.sta.rm_enabled = 1;
+            wifi_config.sta.btm_enabled = 1;
+#endif
+#if CONFIG_ESP_WIFI_11R_SUPPORT
+            wifi_config.sta.ft_enabled = 1;
+#endif
+        }
 
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
         auto ret = esp_wifi_connect();
