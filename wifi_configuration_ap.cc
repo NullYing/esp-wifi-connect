@@ -115,13 +115,12 @@ void WifiConfigurationAp::Start()
 
 std::string WifiConfigurationAp::GetSsid()
 {
-    // Get MAC and use it to generate a unique SSID
+    // Use the STA MAC currently configured in the WiFi driver. Applications
+    // may override it with esp_wifi_set_mac() (for example, with a MAC
+    // provisioned during manufacturing); esp_read_mac() would bypass that
+    // override and always derive the address from eFuse.
     uint8_t mac[6];
-#if CONFIG_IDF_TARGET_ESP32P4
-    esp_wifi_get_mac(WIFI_IF_AP, mac);
-#else
-    ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP));
-#endif
+    ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, mac));
     char ssid[32];
     snprintf(ssid, sizeof(ssid), "%s-%02X%02X", ssid_prefix_.c_str(), mac[4], mac[5]);
     return std::string(ssid);
