@@ -721,6 +721,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     }
     
     is_connecting_ = true;
+    last_connected_channel_ = 0;
 
     // Upper-level retry loop with delay between attempts.
     //
@@ -766,8 +767,17 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
 
         wifi_config_t wifi_config;
         bzero(&wifi_config, sizeof(wifi_config));
-        strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), 32);
-        strlcpy((char *)wifi_config.sta.password, password.c_str(), 64);
+        size_t ssid_len = ssid.size();
+        if (ssid_len > sizeof(wifi_config.sta.ssid)) {
+            ssid_len = sizeof(wifi_config.sta.ssid);
+        }
+        memcpy(wifi_config.sta.ssid, ssid.data(), ssid_len);
+
+        size_t password_len = password.size();
+        if (password_len > sizeof(wifi_config.sta.password)) {
+            password_len = sizeof(wifi_config.sta.password);
+        }
+        memcpy(wifi_config.sta.password, password.data(), password_len);
         wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
         wifi_config.sta.failure_retry_cnt = 1;
 
@@ -820,7 +830,11 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     is_connecting_ = false;
 
     if (connected) {
-        ESP_LOGI(TAG, "Connected to WiFi %s", ssid.c_str());
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            last_connected_channel_ = ap_info.primary;
+        }
+        ESP_LOGI(TAG, "Connected to WiFi %s, channel %u", ssid.c_str(), last_connected_channel_);
         esp_wifi_disconnect();
         return true;
     } else {
@@ -833,8 +847,18 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
 
 void WifiConfigurationAp::Save(const std::string &ssid, const std::string &password)
 {
-    ESP_LOGI(TAG, "Save SSID %s %d", ssid.c_str(), ssid.length());
-    SsidManager::GetInstance().AddSsid(ssid, password);
+    uint8_t channel = last_connected_channel_;
+    if (channel == 0) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& rec : ap_records_) {
+            if (ssid == reinterpret_cast<const char*>(rec.ssid)) {
+                channel = rec.primary;
+                break;
+            }
+        }
+    }
+    ESP_LOGI(TAG, "Save SSID %s channel %u", ssid.c_str(), channel);
+    SsidManager::GetInstance().AddSsid(ssid, password, channel);
 }
 
 void WifiConfigurationAp::OnExitRequested(std::function<void()> callback)
@@ -912,7 +936,8 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
             ESP_LOGI(TAG, "Got SmartConfig credentials");
             smartconfig_event_got_ssid_pswd_t *evt = (smartconfig_event_got_ssid_pswd_t *)event_data;
 
-            char ssid[32], password[64];
+            char ssid[33] = {0};
+            char password[65] = {0};
             memcpy(ssid, evt->ssid, sizeof(evt->ssid));
             memcpy(password, evt->password, sizeof(evt->password));
             ESP_LOGI(TAG, "SmartConfig SSID: %s, Password: %s", ssid, password);

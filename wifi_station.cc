@@ -4,6 +4,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <esp_idf_version.h>
 #include <esp_log.h>
 #include <esp_wifi.h>
 #include <nvs.h>
@@ -118,6 +119,8 @@ void WifiStation::Start() {
     // Clear stopped event bit so WaitForConnected works properly
     // Clear scan done bit so Stop() can wait for scan to complete
     xEventGroupClearBits(event_group_, WIFI_EVENT_STOPPED | WIFI_EVENT_SCAN_DONE_BIT);
+    use_saved_channels_scan_ = true;
+    last_scan_used_saved_channels_ = false;
     
     // Create the default WiFi station interface
     station_netif_ = esp_netif_create_default_wifi_sta();
@@ -155,7 +158,7 @@ void WifiStation::Start() {
     // from light-sleep wakeup sources.
     esp_timer_create_args_t timer_args = {
         .callback = [](void* arg) {
-            esp_wifi_scan_start(nullptr, false);
+            static_cast<WifiStation*>(arg)->StartScan();
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -171,6 +174,54 @@ bool WifiStation::WaitForConnected(int timeout_ms) {
                                     pdFALSE, pdFALSE, timeout_ms / portTICK_PERIOD_MS);
     // Return true only if connected (not if stopped)
     return (bits & WIFI_EVENT_CONNECTED) != 0;
+}
+
+void WifiStation::StartScan() {
+    std::vector<uint8_t> channels;
+    if (use_saved_channels_scan_) {
+        channels = SsidManager::GetInstance().GetSavedChannels();
+    }
+
+    if (channels.empty()) {
+        last_scan_used_saved_channels_ = false;
+        ESP_LOGI(TAG, "Scanning all channels");
+        esp_wifi_scan_start(nullptr, false);
+        return;
+    }
+
+    wifi_scan_config_t scan_config = {};
+    last_scan_used_saved_channels_ = true;
+
+    if (channels.size() == 1) {
+        scan_config.channel = channels[0];
+        ESP_LOGI(TAG, "Scanning saved channel %u", channels[0]);
+    } else {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
+        for (uint8_t ch : channels) {
+            if (CHANNEL_TO_BIT_NUMBER(ch) == 0) {
+                continue;
+            }
+            if (ch >= 1 && ch <= 14) {
+                scan_config.channel_bitmap.ghz_2_channels |= CHANNEL_TO_BIT(ch);
+            } else {
+                scan_config.channel_bitmap.ghz_5_channels |= CHANNEL_TO_BIT(ch);
+            }
+        }
+        ESP_LOGI(TAG, "Scanning %d saved channels", static_cast<int>(channels.size()));
+#else
+        scan_config.channel = channels[0];
+        ESP_LOGI(TAG, "Scanning first saved channel %u", channels[0]);
+#endif
+    }
+
+    esp_err_t err = esp_wifi_scan_start(&scan_config, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Saved-channel scan failed: %s, falling back to full scan",
+                 esp_err_to_name(err));
+        last_scan_used_saved_channels_ = false;
+        use_saved_channels_scan_ = false;
+        esp_wifi_scan_start(nullptr, false);
+    }
 }
 
 void WifiStation::HandleScanResult() {
@@ -210,6 +261,13 @@ void WifiStation::HandleScanResult() {
     free(ap_records);
 
     if (connect_queue_.empty()) {
+        if (last_scan_used_saved_channels_) {
+            ESP_LOGI(TAG, "No AP on saved channels, starting full scan");
+            use_saved_channels_scan_ = false;
+            last_scan_used_saved_channels_ = false;
+            StartScan();
+            return;
+        }
         ESP_LOGI(TAG, "No AP found, next scan in %d seconds", scan_current_interval_microseconds_ / 1000 / 1000);
         esp_timer_start_once(timer_handle_, scan_current_interval_microseconds_);
         UpdateScanInterval();
@@ -231,29 +289,39 @@ void WifiStation::StartConnect() {
 
     wifi_config_t wifi_config;
     bzero(&wifi_config, sizeof(wifi_config));
-    strcpy((char *)wifi_config.sta.ssid, ap_record.ssid.c_str());
-    strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
+    size_t ssid_len = ap_record.ssid.size();
+    if (ssid_len > sizeof(wifi_config.sta.ssid)) {
+        ssid_len = sizeof(wifi_config.sta.ssid);
+    }
+    memcpy(wifi_config.sta.ssid, ap_record.ssid.data(), ssid_len);
+
+    size_t password_len = ap_record.password.size();
+    if (password_len > sizeof(wifi_config.sta.password)) {
+        password_len = sizeof(wifi_config.sta.password);
+    }
+    memcpy(wifi_config.sta.password, ap_record.password.data(), password_len);
+
+    if (ap_record.channel != 0) {
+        // We just found this AP; start on its channel instead of scanning all.
+        wifi_config.sta.channel = ap_record.channel;
+    }
 
     if (remember_bssid_) {
         // Explicit opt-in: pin to this exact AP (BSSID + channel) for the fastest
         // reconnect. This intentionally disables roaming between same-SSID APs.
-        wifi_config.sta.channel = ap_record.channel;
         memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);
         wifi_config.sta.bssid_set = true;
-    } else {
-        // Default: do not lock a BSSID. Ask the driver to scan every channel and
-        // connect to the same-SSID AP with the strongest signal, instead of the
-        // first match found by the default fast scan (which may be a weaker
-        // same-name hotspot). Because no BSSID is pinned, a later reconnect (e.g.
-        // after moving to another room) will scan again and roam to whichever AP
-        // is strongest at that time.
+    } else if (ap_record.channel == 0) {
+        // Channel unknown: ask the driver to scan every channel and connect to
+        // the same-SSID AP with the strongest signal.
         wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
         wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-        // Retry the strongest AP this many times before falling back to a weaker
-        // same-SSID AP. Requires WIFI_ALL_CHANNEL_SCAN (set above). Without this
-        // the driver gives up after a single auth failure and immediately moves on,
-        // which is why we saw it connect to a -79 dBm AP even though a -73 dBm one
-        // was available (the stronger AP rejected the first attempt).
+        wifi_config.sta.failure_retry_cnt = failure_retry_cnt_;
+    } else {
+        // Channel is already known from our scan. Use a fast scan on that
+        // channel so connect does not walk the whole band again.
+        wifi_config.sta.scan_method = WIFI_FAST_SCAN;
+        wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
         wifi_config.sta.failure_retry_cnt = failure_retry_cnt_;
     }
     wifi_config.sta.listen_interval = 10;
@@ -340,7 +408,7 @@ void WifiStation::UpdateScanInterval() {
 void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     auto* this_ = static_cast<WifiStation*>(arg);
     if (event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_scan_start(nullptr, false);
+        this_->StartScan();
         if (this_->on_scan_begin_) {
             this_->on_scan_begin_();
         }
@@ -395,7 +463,13 @@ void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t
     }
     this_->connect_queue_.clear();
     this_->reconnect_count_ = 0;
-    
+    this_->use_saved_channels_scan_ = true;
+
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        SsidManager::GetInstance().UpdateSsidChannel(this_->ssid_, ap_info.primary);
+    }
+
     // Reset scan interval to minimum for fast reconnect if disconnected later
     this_->scan_current_interval_microseconds_ = this_->scan_min_interval_microseconds_;
 }
