@@ -9,6 +9,7 @@
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_netif.h>
+#include <esp_idf_version.h>
 #include <lwip/ip_addr.h>
 #include <nvs.h>
 #include <nvs_flash.h>
@@ -147,6 +148,20 @@ void WifiConfigurationAp::StartAccessPoint()
     IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
     esp_netif_dhcps_stop(ap_netif_);
     esp_netif_set_ip_info(ap_netif_, &ip_info);
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
+    // RFC 8910: advertise the portal explicitly. Modern macOS and other
+    // desktop clients can discover it without relying solely on probe URLs.
+    static const char captive_portal_uri[] = "http://192.168.4.1/";
+    esp_err_t captive_portal_err = esp_netif_dhcps_option(
+        ap_netif_, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI,
+        const_cast<char *>(captive_portal_uri), strlen(captive_portal_uri));
+    if (captive_portal_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set DHCP captive portal URI: %s",
+                 esp_err_to_name(captive_portal_err));
+    }
+#endif
+
     esp_netif_dhcps_start(ap_netif_);
 
     // Start the DNS server
@@ -479,6 +494,8 @@ void WifiConfigurationAp::StartWebServer()
         httpd_resp_set_type(req, "text/html");
         httpd_resp_set_status(req, "302 Found");
         httpd_resp_set_hdr(req, "Location", url.c_str());
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+        httpd_resp_set_hdr(req, "Pragma", "no-cache");
         httpd_resp_set_hdr(req, "Connection", "close");
         httpd_resp_send(req, NULL, 0);
         return ESP_OK;
@@ -490,6 +507,7 @@ void WifiConfigurationAp::StartWebServer()
         "/generate_204*",           // Android
         "/mobile/status.php",      // Android
         "/check_network_status.txt", // Windows
+        "/connecttest.txt",       // Windows 10/11
         "/ncsi.txt",              // Windows
         "/fwlink/",               // Microsoft
         "/connectivity-check.html", // Firefox
@@ -669,6 +687,18 @@ void WifiConfigurationAp::StartWebServer()
         .user_ctx = this
     };
     ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &advanced_submit));
+
+    // Keep this last so application endpoints above win before the wildcard.
+    // Windows currently requests /connecttest.txt, while probe paths can vary
+    // by OS version. Redirecting every otherwise unknown HTTP GET is the
+    // future-proof captive portal behavior recommended by ESP-IDF.
+    httpd_uri_t captive_portal_fallback = {
+        .uri = "/*",
+        .method = HTTP_GET,
+        .handler = captive_portal_handler,
+        .user_ctx = this
+    };
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &captive_portal_fallback));
 
     ESP_LOGI(TAG, "Web server started");
 }
