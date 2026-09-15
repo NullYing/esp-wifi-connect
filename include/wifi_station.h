@@ -89,7 +89,10 @@ private:
     std::function<void()> on_scan_begin_;
     std::vector<WifiApRecord> connect_queue_;
     bool was_connected_ = false;  // Track if we were connected before disconnection
+    bool use_saved_channels_scan_ = true;       // First scan uses saved channels when known
+    bool last_scan_used_saved_channels_ = false;
 
+    void StartScan();
     void HandleScanResult();
     void StartConnect();
     void UpdateScanInterval();  // Exponential backoff for scan interval
